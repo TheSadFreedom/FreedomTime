@@ -1,0 +1,22 @@
+# Build / packaging
+build/
+dist/
+*.exe
+*.pkg
+*.pyz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
