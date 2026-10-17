@@ -1,4 +1,4 @@
-"""FreedomTime — каждые 45 минут блокирует мышь на 7 минут."""
+"""FreedomTime — перерывы по таймеру: блокировка экрана или напоминание."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pystray
 import tkinter as tk
+import tkinter.font as tkfont
 from PIL import Image, ImageDraw
 
 WORK_MINUTES = 45.0
@@ -28,17 +29,25 @@ SNOOZE_MINUTES = 20.0
 SKIP_HOLD_SECONDS = 3.0
 TICK_MS = 100
 
-BG = "#0d1117"
-TITLEBAR = "#0d1117"
-TITLEBAR_HOVER = "#21262d"
-TITLEBAR_CLOSE_HOVER = "#c42b1c"
-CARD = "#161b22"
-TEXT = "#e6edf3"
-MUTED = "#8b949e"
-ACCENT = "#58a6ff"
-BREAK_ACCENT = "#f0883e"
-WARN_ACCENT = "#e3b341"
-GREEN = "#3fb950"
+BG = "#0e1014"
+TITLEBAR = "#0e1014"
+TITLEBAR_HOVER = "#262a34"
+TITLEBAR_CLOSE_HOVER = "#e5484d"
+CARD = "#171a21"
+BORDER = "#2c313c"
+HOVER = "#242833"
+TEXT = "#f4f5f7"
+MUTED = "#979eab"
+ACCENT = "#7c93ff"
+ACCENT_HOVER = "#6b84f7"
+BREAK_ACCENT = "#ff8b5a"
+WARN_ACCENT = "#f0c14d"
+GREEN = "#3ecf8e"
+ERROR = "#ff6b6b"
+SELECTED = "#1a2033"
+MODE_LOCK = "lock"
+MODE_REMIND = "remind"
+MAX_MINUTES = 600.0
 
 WH_MOUSE_LL = 14
 WM_QUIT = 0x0012
@@ -294,18 +303,218 @@ def beep_end() -> None:
         pass
 
 
+def ui_font(size: int, weight: str = "normal") -> tuple:
+    if weight == "bold":
+        return ("Segoe UI", size, "bold")
+    return ("Segoe UI", size)
+
+
+def _rgba(hex_color: str) -> tuple[int, int, int, int]:
+    h = hex_color.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255
+
+
+def paint_round_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs):
+    radius = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
+    points = [
+        x1 + radius, y1,
+        x2 - radius, y1,
+        x2, y1,
+        x2, y1 + radius,
+        x2, y2 - radius,
+        x2, y2,
+        x2 - radius, y2,
+        x1 + radius, y2,
+        x1, y2,
+        x1, y2 - radius,
+        x1, y1 + radius,
+        x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+class CountdownRing(tk.Canvas):
+    def __init__(self, parent: tk.Misc, size: int = 208, font_size: int = 28, bg: str = BG) -> None:
+        super().__init__(parent, width=size, height=size, bg=bg, highlightthickness=0, bd=0)
+        self._size = size
+        self._font_size = font_size
+        self.set(1, GREEN, "00:00")
+
+    def set(self, fraction: float, color: str, label: str) -> None:
+        self.delete("all")
+        size = self._size
+        pad = max(10, int(size * 0.07))
+        width = max(7, int(size * 0.034))
+        fraction = max(0.0, min(1.0, fraction))
+        self.create_oval(pad, pad, size - pad, size - pad, outline=BORDER, width=width)
+        if fraction > 0.004:
+            self.create_arc(
+                pad,
+                pad,
+                size - pad,
+                size - pad,
+                start=90,
+                extent=-359.9 * fraction,
+                style="arc",
+                outline=color,
+                width=width,
+            )
+        self.create_text(
+            size / 2,
+            size / 2 + 1,
+            text=label,
+            fill=TEXT,
+            font=ui_font(self._font_size, "bold"),
+        )
+
+
+class PillButton(tk.Canvas):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        text: str,
+        command=None,
+        *,
+        fill: str = CARD,
+        fg: str = TEXT,
+        hover: str | None = None,
+        bg: str = BG,
+    ) -> None:
+        self._text = text
+        self._command = command
+        self._fill = fill
+        self._fg = fg
+        self._hover_fill = hover or HOVER
+        self._bg = bg
+        self._state = "normal"
+        self._hovered = False
+        self._font = ui_font(10)
+        width = self._text_width() + 36
+        super().__init__(
+            parent,
+            width=width,
+            height=36,
+            bg=bg,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self._redraw()
+
+    def _text_width(self) -> int:
+        return tkfont.Font(font=self._font).measure(self._text)
+
+    def _on_enter(self, _event: tk.Event) -> None:
+        self._hovered = True
+        self._redraw()
+
+    def _on_leave(self, _event: tk.Event) -> None:
+        self._hovered = False
+        self._redraw()
+
+    def _on_click(self, _event: tk.Event) -> None:
+        if self._state == "disabled" or self._command is None:
+            return
+        self._command()
+
+    def configure(self, cnf=None, **kwargs):
+        if isinstance(cnf, dict):
+            kwargs = {**cnf, **kwargs}
+        state = kwargs.pop("state", None)
+        text = kwargs.pop("text", None)
+        if state is not None:
+            self._state = state
+        if text is not None:
+            self._text = text
+            super().configure(width=self._text_width() + 36)
+        if kwargs:
+            super().configure(**kwargs)
+        cursor = "arrow" if self._state == "disabled" else "hand2"
+        super().configure(cursor=cursor)
+        self._redraw()
+
+    config = configure
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        width = int(self.cget("width"))
+        height = int(self.cget("height"))
+        disabled = self._state == "disabled"
+        fill = CARD if disabled else (self._hover_fill if self._hovered else self._fill)
+        fg = MUTED if disabled else self._fg
+        paint_round_rect(self, 1, 1, width - 1, height - 1, 18, fill=fill, outline="")
+        self.create_text(width / 2, height / 2, text=self._text, fill=fg, font=self._font)
+
+
+class Toggle(tk.Canvas):
+    def __init__(self, parent: tk.Misc, variable: tk.BooleanVar, bg: str = CARD) -> None:
+        super().__init__(parent, width=42, height=24, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
+        self.variable = variable
+        self._bg = bg
+        self.variable.trace_add("write", self._on_var)
+        self.bind("<Button-1>", self._toggle)
+        self._draw()
+
+    def _on_var(self, *_args) -> None:
+        try:
+            self._draw()
+        except tk.TclError:
+            pass
+
+    def _toggle(self, _event: tk.Event | None = None) -> None:
+        self.variable.set(not bool(self.variable.get()))
+
+    def _draw(self) -> None:
+        self.delete("all")
+        on = bool(self.variable.get())
+        paint_round_rect(self, 1, 2, 41, 22, 10, fill=ACCENT if on else "#3a4050", outline="")
+        knob = 23 if on else 4
+        self.create_oval(knob, 5, knob + 14, 19, fill="#f7f8fb", outline="")
+
+
+class StepButton(tk.Canvas):
+    def __init__(self, parent: tk.Misc, text: str, command, bg: str = CARD) -> None:
+        super().__init__(parent, width=28, height=28, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
+        self._command = command
+        self._text = text
+        self._hover = False
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self._draw()
+
+    def _on_click(self, _event: tk.Event) -> None:
+        self._command()
+
+    def _on_enter(self, _event: tk.Event) -> None:
+        self._hover = True
+        self._draw()
+
+    def _on_leave(self, _event: tk.Event) -> None:
+        self._hover = False
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        paint_round_rect(self, 1, 1, 27, 27, 8, fill="#2c3140" if self._hover else HOVER, outline="")
+        self.create_text(14, 14, text=self._text, fill=TEXT, font=ui_font(14))
+
+
 def make_tray_image(on_break: bool = False, warning: bool = False) -> Image.Image:
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     if on_break:
-        fill = (240, 136, 62, 255)
+        fill = _rgba(BREAK_ACCENT)
     elif warning:
-        fill = (227, 179, 65, 255)
+        fill = _rgba(WARN_ACCENT)
     else:
-        fill = (63, 185, 80, 255)
+        fill = _rgba(GREEN)
     draw.ellipse((2, 2, size - 3, size - 3), fill=fill)
-    draw.ellipse((18, 18, size - 19, size - 19), fill=(13, 17, 23, 255))
+    draw.ellipse((18, 18, size - 19, size - 19), fill=_rgba(BG))
     draw.pieslice((18, 18, size - 19, size - 19), start=-90, end=50, fill=fill)
     return img
 
@@ -489,12 +698,68 @@ class AudioSilencer:
         return devices
 
 
+def positive_float(value: object, default: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return default
+    try:
+        number = float(value)
+    except ValueError:
+        return default
+    if number <= 0:
+        return default
+    return number
+
+
+def warn_seconds_for(work_seconds: float) -> float:
+    warn = WARN_MINUTES * 60.0
+    if work_seconds > warn + 1:
+        return warn
+    return max(1.0, work_seconds * 0.5)
+
+
+def format_minutes(seconds: float) -> str:
+    minutes = seconds / 60.0
+    if abs(minutes - round(minutes)) < 1e-6:
+        return str(int(round(minutes)))
+    return f"{minutes:.2f}".rstrip("0").rstrip(".")
+
+
+def make_settings(
+    work_minutes: float,
+    break_minutes: float,
+    mode: str,
+    snooze_seconds: float | None = None,
+) -> Settings:
+    if mode not in (MODE_LOCK, MODE_REMIND):
+        mode = MODE_LOCK
+    work_seconds = work_minutes * 60.0
+    return Settings(
+        work_seconds=work_seconds,
+        break_seconds=break_minutes * 60.0,
+        warn_seconds=warn_seconds_for(work_seconds),
+        snooze_seconds=SNOOZE_MINUTES * 60.0 if snooze_seconds is None else snooze_seconds,
+        mode=mode,
+    )
+
+
+def settings_from_config(config: dict) -> Settings:
+    mode = config.get("mode")
+    if mode not in (MODE_LOCK, MODE_REMIND):
+        mode = MODE_LOCK
+    return make_settings(
+        positive_float(config.get("work_minutes"), WORK_MINUTES),
+        positive_float(config.get("break_minutes"), BREAK_MINUTES),
+        mode,
+    )
+
+
 @dataclass
 class Settings:
     work_seconds: float
     break_seconds: float
     warn_seconds: float
     snooze_seconds: float
+    mode: str = MODE_LOCK
 
 
 class FreedomTimeApp:
@@ -534,8 +799,14 @@ class FreedomTimeApp:
         self.overlay: tk.Toplevel | None = None
         self.overlay_time: tk.Label | None = None
         self.overlay_skip: tk.Label | None = None
+        self.overlay_ring: CountdownRing | None = None
         self.warn_win: tk.Toplevel | None = None
         self.warn_time: tk.Label | None = None
+        self.warn_body: tk.Label | None = None
+        self.remind_win: tk.Toplevel | None = None
+        self.remind_time: tk.Label | None = None
+        self._settings_visible = False
+        self._main_width = 0
 
     def run(self) -> None:
         self._apply_autostart(self.autostart_enabled)
@@ -565,6 +836,7 @@ class FreedomTimeApp:
     def _start_tray(self) -> None:
         menu = pystray.Menu(
             pystray.MenuItem("Показать окно", self._tray_show, default=True),
+            pystray.MenuItem("Настройки", self._tray_settings),
             pystray.MenuItem(
                 "Перерыв сейчас",
                 self._tray_break,
@@ -621,6 +893,9 @@ class FreedomTimeApp:
     def _tray_show(self, _icon=None, _item=None) -> None:
         self._tray_call(self.show_window)
 
+    def _tray_settings(self, _icon=None, _item=None) -> None:
+        self._tray_call(self.open_settings)
+
     def _tray_break(self, _icon=None, _item=None) -> None:
         self._tray_call(self.start_break)
 
@@ -645,7 +920,7 @@ class FreedomTimeApp:
         self._window_visible = True
 
     def hide_to_tray(self) -> None:
-        if self.on_break:
+        if self.on_break and self.settings.mode == MODE_LOCK:
             return
         self.root.withdraw()
         self._window_visible = False
@@ -655,9 +930,6 @@ class FreedomTimeApp:
 
     def toggle_autostart(self) -> None:
         self._apply_autostart(not self.autostart_enabled)
-
-    def _on_autostart_toggle(self) -> None:
-        self._apply_autostart(bool(self.autostart_var.get()))
 
     def _apply_autostart(self, enabled: bool) -> None:
         try:
@@ -727,68 +999,63 @@ class FreedomTimeApp:
             pass
 
     def _build_titlebar(self) -> None:
-        bar = tk.Frame(self.root, bg=TITLEBAR, height=36)
+        bar = tk.Frame(self.root, bg=TITLEBAR, height=42)
         bar.pack(fill="x")
         bar.pack_propagate(False)
 
+        mark = tk.Label(bar, text="●", bg=TITLEBAR, fg=GREEN, font=ui_font(8))
+        mark.pack(side="left", padx=(16, 0))
         title = tk.Label(
             bar,
-            text="  FreedomTime",
+            text="FreedomTime",
             bg=TITLEBAR,
             fg=TEXT,
-            font=("Segoe UI", 10),
+            font=ui_font(10, "bold"),
             anchor="w",
         )
-        title.pack(side="left", fill="y")
+        title.pack(side="left", padx=(8, 0), fill="y")
 
-        for widget in (bar, title):
+        for widget in (bar, mark, title):
             widget.bind("<Button-1>", self._start_move)
             widget.bind("<B1-Motion>", self._on_move)
 
-        close_btn = tk.Label(
-            bar,
-            text="\uE8BB",
-            font=("Segoe MDL2 Assets", 8),
-            bg=TITLEBAR,
-            fg=MUTED,
-            width=4,
-            cursor="hand2",
-        )
+        close_btn = self._caption_button(bar, "\uE8BB", self.hide_to_tray, close=True)
         close_btn.pack(side="right", fill="y")
-        close_btn.bind("<Enter>", lambda _e: close_btn.configure(bg=TITLEBAR_CLOSE_HOVER, fg=TEXT))
-        close_btn.bind("<Leave>", lambda _e: close_btn.configure(bg=TITLEBAR, fg=MUTED))
-        close_btn.bind("<Button-1>", lambda _e: self.hide_to_tray())
-
-        min_btn = tk.Label(
-            bar,
-            text="\uE921",
-            font=("Segoe MDL2 Assets", 8),
-            bg=TITLEBAR,
-            fg=MUTED,
-            width=4,
-            cursor="hand2",
-        )
+        min_btn = self._caption_button(bar, "\uE921", self.hide_to_tray)
         min_btn.pack(side="right", fill="y")
-        min_btn.bind("<Enter>", lambda _e: min_btn.configure(bg=TITLEBAR_HOVER, fg=TEXT))
-        min_btn.bind("<Leave>", lambda _e: min_btn.configure(bg=TITLEBAR, fg=MUTED))
-        min_btn.bind("<Button-1>", lambda _e: self.hide_to_tray())
-
-        self.pin_btn = tk.Label(
-            bar,
-            text="\uE718",
-            font=("Segoe MDL2 Assets", 8),
-            bg=TITLEBAR,
-            fg=MUTED,
-            width=4,
-            cursor="hand2",
-        )
+        self.pin_btn = self._caption_button(bar, "\uE718", self.toggle_pin)
         self.pin_btn.pack(side="right", fill="y")
-        self.pin_btn.bind("<Enter>", self._pin_enter)
-        self.pin_btn.bind("<Leave>", self._pin_leave)
-        self.pin_btn.bind("<Button-1>", lambda _e: self.toggle_pin())
         self._refresh_pin_button()
 
-        tk.Frame(self.root, bg="#21262d", height=1).pack(fill="x")
+    def _caption_button(self, parent: tk.Misc, glyph: str, command, close: bool = False) -> tk.Label:
+        button = tk.Label(
+            parent,
+            text=glyph,
+            font=("Segoe MDL2 Assets", 9),
+            bg=TITLEBAR,
+            fg=MUTED,
+            width=5,
+            cursor="hand2",
+        )
+
+        def on_enter(_event: tk.Event) -> None:
+            if close:
+                button.configure(bg=TITLEBAR_CLOSE_HOVER, fg=TEXT)
+            elif button is self.pin_btn and self.pinned:
+                button.configure(bg=TITLEBAR_HOVER, fg=ACCENT)
+            else:
+                button.configure(bg=TITLEBAR_HOVER, fg=TEXT)
+
+        def on_leave(_event: tk.Event) -> None:
+            if button is getattr(self, "pin_btn", None):
+                self._refresh_pin_button()
+                return
+            button.configure(bg=TITLEBAR, fg=MUTED)
+
+        button.bind("<Enter>", on_enter)
+        button.bind("<Leave>", on_leave)
+        button.bind("<Button-1>", lambda _event: command())
+        return button
 
     def _start_move(self, event: tk.Event) -> None:
         hwnd = self._hwnd()
@@ -814,12 +1081,6 @@ class FreedomTimeApp:
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
         )
 
-    def _pin_enter(self, _event: tk.Event | None = None) -> None:
-        self.pin_btn.configure(bg=TITLEBAR_HOVER, fg=ACCENT if self.pinned else TEXT)
-
-    def _pin_leave(self, _event: tk.Event | None = None) -> None:
-        self._refresh_pin_button()
-
     def _refresh_pin_button(self) -> None:
         if not hasattr(self, "pin_btn"):
             return
@@ -829,129 +1090,424 @@ class FreedomTimeApp:
             self.pin_btn.configure(text="\uE718", bg=TITLEBAR, fg=MUTED)
 
     def _build_panel(self) -> None:
-        pad = tk.Frame(self.root, bg=BG, padx=28, pady=20)
-        pad.pack()
+        self.main_frame = tk.Frame(self.root, bg=BG)
+        self.main_frame.pack(fill="both", expand=True)
+        pad = tk.Frame(self.main_frame, bg=BG, padx=32, pady=22)
+        pad.pack(fill="both", expand=True)
 
-        subtitle = tk.Label(
+        self.subtitle = tk.Label(
             pad,
-            text=f"Работа {format_hms(self.settings.work_seconds)}  ·  "
-            f"перерыв {format_hms(self.settings.break_seconds)}",
+            text=self._schedule_text(),
             bg=BG,
             fg=MUTED,
-            font=("Segoe UI", 10),
+            font=ui_font(9),
+            justify="center",
         )
-        subtitle.pack(anchor="w", pady=(0, 18))
+        self.subtitle.pack(pady=(0, 8))
 
-        card = tk.Frame(pad, bg=CARD, padx=20, pady=16)
-        card.pack(fill="x")
+        self.ring = CountdownRing(pad, size=208, font_size=28)
+        self.ring.pack(pady=(4, 2))
+        self.ring.set(1, GREEN, format_hms(self.settings.work_seconds))
+
+        self.timer_label = tk.Label(pad, text=format_hms(self.settings.work_seconds), bg=BG, fg=TEXT)
 
         self.status_label = tk.Label(
-            card,
+            pad,
             text="Работа",
-            bg=CARD,
+            bg=BG,
             fg=GREEN,
-            font=("Segoe UI", 12, "bold"),
+            font=ui_font(12, "bold"),
         )
-        self.status_label.pack(anchor="w")
-
-        self.timer_label = tk.Label(
-            card,
-            text="00:00",
-            bg=CARD,
-            fg=TEXT,
-            font=("Segoe UI", 32, "bold"),
-        )
-        self.timer_label.pack(anchor="w", pady=(4, 0))
+        self.status_label.pack(pady=(8, 0))
 
         self.hint_label = tk.Label(
-            card,
-            text="до блокировки мыши",
-            bg=CARD,
+            pad,
+            text=self._work_hint(),
+            bg=BG,
             fg=MUTED,
-            font=("Segoe UI", 10),
+            font=ui_font(10),
         )
-        self.hint_label.pack(anchor="w")
+        self.hint_label.pack(pady=(2, 0))
 
         buttons = tk.Frame(pad, bg=BG)
-        buttons.pack(fill="x", pady=(18, 0))
+        buttons.pack(fill="x", pady=(22, 0))
 
-        self.break_btn = tk.Button(
-            buttons,
-            text="Перерыв сейчас",
-            command=self.start_break,
-            bg=CARD,
-            fg=TEXT,
-            activebackground="#21262d",
-            activeforeground=TEXT,
-            relief="flat",
-            padx=14,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 10),
-        )
+        actions = tk.Frame(buttons, bg=BG)
+        actions.pack(side="left")
+        self.break_btn = PillButton(actions, "Перерыв сейчас", self.start_break, fill=CARD, fg=TEXT)
         self.break_btn.pack(side="left")
-
-        self.snooze_btn = tk.Button(
-            buttons,
-            text=self._snooze_label(),
-            command=self.snooze,
-            bg=CARD,
+        self.snooze_btn = PillButton(
+            actions,
+            self._snooze_label(),
+            self.snooze,
+            fill=CARD,
             fg=WARN_ACCENT,
-            activebackground="#21262d",
-            activeforeground=WARN_ACCENT,
-            relief="flat",
-            padx=14,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 10),
-            state="disabled",
         )
         self.snooze_btn.pack(side="left", padx=(8, 0))
+        self.snooze_btn.configure(state="disabled")
 
-        hide_btn = tk.Button(
-            buttons,
-            text="В трей",
-            command=self.hide_to_tray,
-            bg=CARD,
-            fg=MUTED,
-            activebackground="#21262d",
-            activeforeground=TEXT,
-            relief="flat",
-            padx=14,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 10),
-        )
-        hide_btn.pack(side="right")
+        settings_btn = PillButton(buttons, "Настройки", self.open_settings, fill=CARD, fg=TEXT)
+        settings_btn.pack(side="right")
 
-        self.autostart_check = tk.Checkbutton(
+        self.hotkeys_label = tk.Label(
             pad,
-            text="Запускать вместе с Windows",
-            variable=self.autostart_var,
-            command=self._on_autostart_toggle,
+            text=self._hotkeys_text(),
             bg=BG,
             fg=MUTED,
-            selectcolor=CARD,
-            activebackground=BG,
-            activeforeground=TEXT,
-            highlightthickness=0,
-            bd=0,
-            cursor="hand2",
-            font=("Segoe UI", 9),
+            font=ui_font(8),
+            justify="center",
+            wraplength=420,
         )
-        self.autostart_check.pack(anchor="w", pady=(16, 0))
+        self.hotkeys_label.pack(pady=(18, 0))
+        self._build_settings_view()
 
-        hotkeys = tk.Label(
+    def _schedule_text(self) -> str:
+        mode = "блокировка" if self.settings.mode == MODE_LOCK else "напоминание"
+        return (
+            f"Работа {format_hms(self.settings.work_seconds)}  ·  "
+            f"перерыв {format_hms(self.settings.break_seconds)}  ·  {mode}"
+        )
+
+    def _work_hint(self) -> str:
+        if self.settings.mode == MODE_LOCK:
+            return "до блокировки мыши"
+        return "до напоминания"
+
+    def _break_hint(self) -> str:
+        if self.settings.mode == MODE_LOCK:
+            return "мышь, звук и микрофон выключены"
+        return "напоминание о перерыве"
+
+    def _warning_body(self) -> str:
+        if self.settings.mode == MODE_LOCK:
+            return "Мышь будет заблокирована. Можно отложить перерыв."
+        return "Появится напоминание. Можно отложить перерыв."
+
+    def _warning_notify(self) -> str:
+        if self.settings.mode == MODE_LOCK:
+            what = "Мышь заблокируется"
+        else:
+            what = "Появится напоминание"
+        return f"{what} через {format_hms(self.remaining())}. {self._snooze_label()}."
+
+    def _hotkeys_text(self) -> str:
+        if self.settings.mode == MODE_LOCK:
+            skip = "На перерыве удерживайте Escape 3 секунды, чтобы пропустить"
+        else:
+            skip = "В режиме напоминания окно можно закрыть и продолжить работу"
+        return (
+            "Иконка в трее (стрелка ^). Закрытие окна не завершает программу.\n"
+            "Ctrl+Alt+U — закончить перерыв   ·   Ctrl+Alt+Q — выход\n"
+            + skip
+        )
+
+    def _refresh_schedule_labels(self) -> None:
+        self.subtitle.configure(text=self._schedule_text())
+        self.hotkeys_label.configure(text=self._hotkeys_text())
+
+    def _persist_settings(self) -> None:
+        self._config["autostart"] = self.autostart_enabled
+        self._config["work_minutes"] = self.settings.work_seconds / 60.0
+        self._config["break_minutes"] = self.settings.break_seconds / 60.0
+        self._config["mode"] = self.settings.mode
+        save_config(self._config)
+
+    def _apply_runtime_settings(self, new: Settings) -> None:
+        old_mode = self.settings.mode
+        self.settings = new
+        self._refresh_schedule_labels()
+        if self.on_break and old_mode != new.mode:
+            self._switch_break_mode()
+            return
+        if self.on_break:
+            self.hint_label.configure(text=self._break_hint(), fg=MUTED)
+            return
+        if self._in_warning_window():
+            self.hint_label.configure(text="можно отложить", fg=WARN_ACCENT)
+            self._set_snooze_enabled(True)
+            if self.warn_body is not None:
+                self.warn_body.configure(text=self._warning_body())
+            return
+        self._warning_shown = False
+        self._hide_warning()
+        self._set_snooze_enabled(False)
+        self.status_label.configure(text="Работа", fg=GREEN)
+        self.hint_label.configure(text=self._work_hint(), fg=MUTED)
+
+    def _switch_break_mode(self) -> None:
+        if self.settings.mode == MODE_LOCK:
+            self._hide_reminder()
+            self.hint_label.configure(text=self._break_hint(), fg=MUTED)
+            self._show_overlay()
+            self.blocker.lock()
+            self.audio.silence()
+            return
+        self.audio.restore()
+        self.blocker.unlock()
+        self._hide_overlay()
+        self._restore_root_after_overlay()
+        self.hint_label.configure(text=self._break_hint(), fg=MUTED)
+        self._show_reminder()
+
+    def open_settings(self) -> None:
+        if self._quitting or (self.on_break and self.settings.mode == MODE_LOCK):
+            return
+        self.show_window()
+        self._load_settings_form()
+        if self._settings_visible:
+            self._work_entry.focus_set()
+            return
+        self.root.update_idletasks()
+        self._main_width = max(self._main_width, self.root.winfo_width(), self.root.winfo_reqwidth())
+        self.main_frame.pack_forget()
+        self.settings_frame.pack(fill="both", expand=True)
+        self._settings_visible = True
+        self.root.bind("<Escape>", self._on_settings_escape)
+        self._fit_window()
+        self._apply_window_chrome()
+        self._work_entry.focus_set()
+
+    def _build_settings_view(self) -> None:
+        self.settings_frame = tk.Frame(self.root, bg=BG)
+        pad = tk.Frame(self.settings_frame, bg=BG, padx=32, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text="Настройки", bg=BG, fg=TEXT, font=ui_font(20, "bold")).pack(anchor="w")
+        tk.Label(
             pad,
-            text="Иконка в трее (стрелка ^). Закрытие окна не завершает программу.\n"
-            "Ctrl+Alt+U — снять блокировку   ·   Ctrl+Alt+Q — выход\n"
-            "На перерыве удерживайте Escape 3 секунды, чтобы пропустить",
+            text="Расписание и то, как приложение зовёт на перерыв",
             bg=BG,
             fg=MUTED,
-            font=("Segoe UI", 8),
+            font=ui_font(9),
+        ).pack(anchor="w", pady=(4, 0))
+
+        schedule = tk.Frame(pad, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
+        schedule.pack(fill="x", pady=(18, 0))
+        self._settings_autostart = tk.BooleanVar(value=self.autostart_enabled)
+        self._switch_row(schedule, "Запускать вместе с Windows")
+        self._settings_divider(schedule)
+        self._work_entry = self._minutes_row(schedule, "Время работы")
+        self._settings_divider(schedule)
+        self._break_entry = self._minutes_row(schedule, "Время перерыва")
+        self._work_entry.insert(0, format_minutes(self.settings.work_seconds))
+        self._break_entry.insert(0, format_minutes(self.settings.break_seconds))
+
+        tk.Label(pad, text="Режим", bg=BG, fg=MUTED, font=ui_font(9)).pack(anchor="w", pady=(18, 8))
+
+        modes = tk.Frame(pad, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
+        modes.pack(fill="x")
+        self._mode_var = tk.StringVar(value=self.settings.mode)
+        self._mode_cards: dict[str, tuple[tk.Frame, tk.Frame, tk.Frame, tk.Label, tk.Label, tk.Canvas]] = {}
+        options = (
+            (MODE_LOCK, "Блокировка экрана", "Мышь, звук и микрофон выключаются"),
+            (MODE_REMIND, "Напоминание", "Окно с таймером, работать можно"),
+        )
+        for index, (value, title, detail) in enumerate(options):
+            if index:
+                self._settings_divider(modes)
+            self._mode_row(modes, value, title, detail)
+        self._paint_mode_cards()
+
+        self._settings_error = tk.Label(
+            pad,
+            text="",
+            bg=BG,
+            fg=ERROR,
+            font=ui_font(9),
+            wraplength=420,
             justify="left",
+            anchor="w",
         )
-        hotkeys.pack(anchor="w", pady=(16, 0))
+
+        self._settings_buttons = tk.Frame(pad, bg=BG)
+        self._settings_buttons.pack(fill="x", pady=(18, 0))
+        actions = tk.Frame(self._settings_buttons, bg=BG)
+        actions.pack(side="right")
+        PillButton(actions, "Отмена", self._hide_settings, fill=CARD, fg=MUTED).pack(side="left")
+        PillButton(
+            actions,
+            "Сохранить",
+            self._save_settings_dialog,
+            fill=ACCENT,
+            hover=ACCENT_HOVER,
+            fg="#f7f8ff",
+        ).pack(side="left", padx=(8, 0))
+
+    def _settings_divider(self, parent: tk.Misc) -> None:
+        line = tk.Frame(parent, bg=BORDER, height=1)
+        line.pack_propagate(False)
+        line.pack(fill="x")
+
+    def _switch_row(self, parent: tk.Misc, caption: str) -> None:
+        row = tk.Frame(parent, bg=CARD)
+        row.pack(fill="x", padx=16, pady=14)
+        tk.Label(row, text=caption, bg=CARD, fg=TEXT, font=ui_font(10)).pack(side="left")
+        Toggle(row, self._settings_autostart, bg=CARD).pack(side="right")
+
+    def _minutes_row(self, parent: tk.Misc, caption: str) -> tk.Entry:
+        row = tk.Frame(parent, bg=CARD)
+        row.pack(fill="x", padx=16, pady=10)
+        tk.Label(row, text=caption, bg=CARD, fg=TEXT, font=ui_font(10)).pack(side="left")
+        cluster = tk.Frame(row, bg=CARD)
+        cluster.pack(side="right")
+        shell = tk.Frame(cluster, bg=BORDER)
+        entry = tk.Entry(
+            shell,
+            bg=CARD,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=ui_font(12),
+            width=4,
+            justify="center",
+            selectbackground=ACCENT,
+            selectforeground="#0e1014",
+        )
+        entry.pack(padx=1, pady=1, ipady=4, ipadx=4)
+        entry.bind("<Return>", lambda _event: self._save_settings_dialog())
+        entry.bind("<FocusIn>", lambda _event, border=shell: border.configure(bg=ACCENT))
+        entry.bind("<FocusOut>", lambda _event, border=shell: border.configure(bg=BORDER))
+        StepButton(cluster, "−", lambda field=entry: self._step_minutes(field, -1)).pack(side="left")
+        shell.pack(side="left", padx=(8, 0))
+        tk.Label(cluster, text="мин", bg=CARD, fg=MUTED, font=ui_font(10)).pack(side="left", padx=(8, 8))
+        StepButton(cluster, "+", lambda field=entry: self._step_minutes(field, 1)).pack(side="left")
+        return entry
+
+    def _step_minutes(self, entry: tk.Entry, delta: float) -> None:
+        try:
+            current = float(entry.get().strip().replace(",", "."))
+        except ValueError:
+            current = 0
+        updated = min(MAX_MINUTES, max(1.0, current + delta))
+        entry.delete(0, "end")
+        if abs(updated - round(updated)) < 1e-6:
+            entry.insert(0, str(int(round(updated))))
+            return
+        entry.insert(0, f"{updated:.2f}".rstrip("0").rstrip("."))
+
+    def _mode_row(self, parent: tk.Misc, value: str, title: str, detail: str) -> None:
+        row = tk.Frame(parent, bg=CARD)
+        row.pack(fill="x")
+        inner = tk.Frame(row, bg=CARD)
+        inner.pack(fill="x", padx=16, pady=12)
+        dot = tk.Canvas(inner, width=18, height=18, bg=CARD, highlightthickness=0, bd=0)
+        dot.pack(side="left", padx=(0, 12))
+        texts = tk.Frame(inner, bg=CARD)
+        texts.pack(side="left", fill="x", expand=True)
+        title_lbl = tk.Label(texts, text=title, bg=CARD, fg=TEXT, font=ui_font(10, "bold"), anchor="w")
+        title_lbl.pack(anchor="w")
+        detail_lbl = tk.Label(texts, text=detail, bg=CARD, fg=MUTED, font=ui_font(9), anchor="w")
+        detail_lbl.pack(anchor="w", pady=(2, 0))
+        self._mode_cards[value] = (row, inner, texts, title_lbl, detail_lbl, dot)
+        for widget in (row, inner, dot, texts, title_lbl, detail_lbl):
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>", lambda _event, mode=value: self._select_mode(mode))
+
+    def _show_settings_error(self, text: str) -> None:
+        self._settings_error.configure(text=text)
+        if not text:
+            if self._settings_error.winfo_ismapped():
+                self._settings_error.pack_forget()
+            return
+        if not self._settings_error.winfo_ismapped():
+            self._settings_error.pack(anchor="w", fill="x", pady=(10, 0), before=self._settings_buttons)
+        self._fit_window()
+
+    def _load_settings_form(self) -> None:
+        self._settings_autostart.set(self.autostart_enabled)
+        self._work_entry.delete(0, "end")
+        self._work_entry.insert(0, format_minutes(self.settings.work_seconds))
+        self._break_entry.delete(0, "end")
+        self._break_entry.insert(0, format_minutes(self.settings.break_seconds))
+        self._mode_var.set(self.settings.mode)
+        self._paint_mode_cards()
+        self._show_settings_error("")
+
+    def _on_settings_escape(self, _event: tk.Event) -> str:
+        self._hide_settings()
+        return "break"
+
+    def _fit_window(self) -> None:
+        self.root.update_idletasks()
+        width = self.root.winfo_reqwidth()
+        height = self.root.winfo_reqheight()
+        if self._settings_visible:
+            width = max(width, self._main_width)
+        else:
+            self._main_width = width
+        self.root.geometry(f"{width}x{height}")
+
+    def _select_mode(self, mode: str) -> None:
+        self._mode_var.set(mode)
+        self._paint_mode_cards()
+
+    def _paint_mode_cards(self) -> None:
+        selected = self._mode_var.get()
+        for value, (row, inner, texts, title_lbl, detail_lbl, dot) in self._mode_cards.items():
+            active = value == selected
+            bg = SELECTED if active else CARD
+            row.configure(bg=bg)
+            inner.configure(bg=bg)
+            texts.configure(bg=bg)
+            title_lbl.configure(bg=bg, fg=ACCENT if active else TEXT)
+            detail_lbl.configure(bg=bg)
+            dot.configure(bg=bg)
+            dot.delete("all")
+            dot.create_oval(1, 1, 16, 16, outline=ACCENT if active else BORDER, width=2)
+            if active:
+                dot.create_oval(5, 5, 12, 12, fill=ACCENT, outline="")
+
+    def _save_settings_dialog(self) -> None:
+        if not self._settings_visible:
+            return
+        try:
+            work = float(self._work_entry.get().strip().replace(",", "."))
+            brk = float(self._break_entry.get().strip().replace(",", "."))
+        except ValueError:
+            self._show_settings_error("Введите число минут")
+            return
+        if work <= 0 or brk <= 0 or work > MAX_MINUTES or brk > MAX_MINUTES:
+            self._show_settings_error(f"Время: больше 0 и не больше {int(MAX_MINUTES)} минут")
+            return
+        mode = self._mode_var.get()
+        if mode not in (MODE_LOCK, MODE_REMIND):
+            mode = MODE_LOCK
+        wanted_autostart = bool(self._settings_autostart.get())
+        switching_to_lock = (
+            self.on_break and mode == MODE_LOCK and self.settings.mode != MODE_LOCK
+        )
+        if switching_to_lock:
+            self._hide_settings()
+        self._apply_autostart(wanted_autostart)
+        autostart_ok = self.autostart_enabled == wanted_autostart
+        self._apply_runtime_settings(
+            make_settings(work, brk, mode, self.settings.snooze_seconds)
+        )
+        self._persist_settings()
+        if not autostart_ok and self._settings_visible:
+            self._settings_autostart.set(self.autostart_enabled)
+            self._show_settings_error("Не удалось изменить автозапуск. Остальные настройки сохранены.")
+            return
+        self._hide_settings()
+
+    def _hide_settings(self) -> None:
+        if not self._settings_visible:
+            return
+        self.root.unbind("<Escape>")
+        self.settings_frame.pack_forget()
+        self.main_frame.pack(fill="both", expand=True)
+        self._settings_visible = False
+        self._fit_window()
+        self._apply_window_chrome()
+
+    def _place_bottom_right(self, win: tk.Misc) -> None:
+        win.update_idletasks()
+        width = win.winfo_reqwidth()
+        height = win.winfo_reqheight()
+        ax, ay, aw, ah = work_area()
+        win.geometry(f"{width}x{height}+{ax + aw - width - 16}+{ay + ah - height - 16}")
 
     def remaining(self) -> float:
         elapsed = time.monotonic() - self.period_started
@@ -988,7 +1544,7 @@ class FreedomTimeApp:
         self._hide_warning()
         self._set_snooze_enabled(False)
         self.status_label.configure(text="Работа", fg=GREEN)
-        self.hint_label.configure(text="до блокировки мыши", fg=MUTED)
+        self.hint_label.configure(text=self._work_hint(), fg=MUTED)
         self._refresh_tray(force_icon=True)
         if self.icon is not None:
             try:
@@ -1001,20 +1557,32 @@ class FreedomTimeApp:
             return
         try:
             self._hide_warning()
+            self._hide_settings()
             self._warning_shown = False
             self._set_snooze_enabled(False)
             self.on_break = True
             self.period_started = time.monotonic()
             self.esc_held = 0.0
             self._overlay_tick = 0
-            self._show_overlay()
             self.break_btn.configure(state="disabled")
             self.status_label.configure(text="Перерыв", fg=BREAK_ACCENT)
-            self.hint_label.configure(text="мышь, звук и микрофон выключены", fg=MUTED)
+            self.hint_label.configure(text=self._break_hint(), fg=MUTED)
             self._refresh_tray(force_icon=True)
-            self.blocker.lock()
             beep_start()
-            self.audio.silence()
+            if self.settings.mode == MODE_LOCK:
+                self._show_overlay()
+                self.blocker.lock()
+                self.audio.silence()
+            else:
+                self._show_reminder()
+                if self.icon is not None:
+                    try:
+                        self.icon.notify(
+                            "Пора сделать перерыв. Окно можно закрыть и продолжить работу.",
+                            "Перерыв",
+                        )
+                    except Exception:
+                        pass
         except Exception as exc:
             self.on_break = False
             try:
@@ -1026,6 +1594,7 @@ class FreedomTimeApp:
             except Exception:
                 pass
             self._hide_overlay()
+            self._hide_reminder()
             self.break_btn.configure(state="normal")
             user32.MessageBoxW(None, str(exc), "FreedomTime", 0x10)
 
@@ -1039,10 +1608,11 @@ class FreedomTimeApp:
         self.audio.restore()
         self.blocker.unlock()
         self._hide_overlay()
+        self._hide_reminder()
         self._restore_root_after_overlay()
         self.break_btn.configure(state="normal")
         self.status_label.configure(text="Работа", fg=GREEN)
-        self.hint_label.configure(text="до блокировки мыши", fg=MUTED)
+        self.hint_label.configure(text=self._work_hint(), fg=MUTED)
         self._refresh_tray(force_icon=True)
         beep_end()
 
@@ -1085,40 +1655,37 @@ class FreedomTimeApp:
         overlay.attributes("-topmost", True)
         overlay.geometry(f"{w}x{h}+{x}+{y}")
 
-        wrap = tk.Frame(overlay, bg=BG)
+        wrap = tk.Frame(
+            overlay,
+            bg=CARD,
+            padx=56,
+            pady=42,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
         wrap.place(relx=0.5, rely=0.5, anchor="center")
 
-        tk.Label(
-            wrap,
-            text="ПЕРЕРЫВ",
-            bg=BG,
-            fg=BREAK_ACCENT,
-            font=("Segoe UI", 18, "bold"),
-        ).pack()
-
-        self.overlay_time = tk.Label(
-            wrap,
-            text=format_hms(self.settings.break_seconds),
-            bg=BG,
-            fg=TEXT,
-            font=("Segoe UI", 96, "bold"),
-        )
-        self.overlay_time.pack(pady=(8, 16))
+        tk.Label(wrap, text="Перерыв", bg=CARD, fg=BREAK_ACCENT, font=ui_font(13, "bold")).pack()
+        self.overlay_ring = CountdownRing(wrap, size=280, font_size=42, bg=CARD)
+        self.overlay_ring.pack(pady=(12, 8))
+        self.overlay_ring.set(1, BREAK_ACCENT, format_hms(self.settings.break_seconds))
+        self.overlay_time = tk.Label(wrap, bg=CARD, fg=TEXT)
 
         tk.Label(
             wrap,
-            text="Мышь, звук и микрофон выключены. Встань, разомнись, посмотри вдаль.",
-            bg=BG,
+            text="Мышь, звук и микрофон выключены.\nВстань, разомнись, посмотри вдаль.",
+            bg=CARD,
             fg=MUTED,
-            font=("Segoe UI", 16),
-        ).pack()
+            font=ui_font(14),
+            justify="center",
+        ).pack(pady=(8, 0))
 
         self.overlay_skip = tk.Label(
             wrap,
             text="Удерживайте Escape 3 секунды, чтобы пропустить",
-            bg=BG,
+            bg=CARD,
             fg=MUTED,
-            font=("Segoe UI", 11),
+            font=ui_font(10),
         )
         self.overlay_skip.pack(pady=(28, 0))
 
@@ -1148,6 +1715,62 @@ class FreedomTimeApp:
             self.overlay = None
             self.overlay_time = None
             self.overlay_skip = None
+            self.overlay_ring = None
+
+    def _show_reminder(self) -> None:
+        if self.remind_win is not None:
+            return
+        self._map_root_for_popup()
+        win, pad = self._floating_card()
+        win.protocol("WM_DELETE_WINDOW", self._hide_reminder)
+        accent = tk.Frame(pad, bg=BREAK_ACCENT, height=3)
+        accent.pack_propagate(False)
+        accent.pack(fill="x")
+        body = tk.Frame(pad, bg=BG, padx=22, pady=18)
+        body.pack(fill="both")
+        tk.Label(body, text="Перерыв", bg=BG, fg=BREAK_ACCENT, font=ui_font(12, "bold")).pack(anchor="w")
+        self.remind_time = tk.Label(
+            body,
+            text=format_hms(max(0.0, self.remaining())),
+            bg=BG,
+            fg=TEXT,
+            font=ui_font(36, "bold"),
+        )
+        self.remind_time.pack(anchor="w", pady=(2, 8))
+        tk.Label(
+            body,
+            text="Встань, разомнись, посмотри вдаль.\nОкно можно закрыть и продолжить работу.",
+            bg=BG,
+            fg=MUTED,
+            font=ui_font(10),
+            justify="left",
+        ).pack(anchor="w")
+
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill="x", pady=(18, 0))
+        PillButton(
+            buttons,
+            "Закончить перерыв",
+            self.end_break,
+            fill=CARD,
+            fg=BREAK_ACCENT,
+        ).pack(side="left")
+        PillButton(buttons, "Закрыть", self._hide_reminder, fill=CARD, fg=MUTED).pack(side="right")
+
+        self._place_bottom_right(win)
+        win.deiconify()
+        win.lift()
+        self.remind_win = win
+
+    def _hide_reminder(self) -> None:
+        if self.remind_win is None:
+            return
+        try:
+            self.remind_win.destroy()
+        except tk.TclError:
+            pass
+        self.remind_win = None
+        self.remind_time = None
 
     def _show_warning(self) -> None:
         self._set_snooze_enabled(True)
@@ -1157,86 +1780,65 @@ class FreedomTimeApp:
         beep_start()
         if self.icon is not None:
             try:
-                self.icon.notify(
-                    f"Мышь заблокируется через {format_hms(self.remaining())}. "
-                    f"{self._snooze_label()}.",
-                    "Скоро перерыв",
-                )
+                self.icon.notify(self._warning_notify(), "Скоро перерыв")
             except Exception:
                 pass
         if self.warn_win is not None:
             return
 
         self._map_root_for_popup()
-        win = tk.Toplevel(self.root)
-        win.title("Скоро перерыв")
-        win.configure(bg=BG)
-        win.resizable(False, False)
-        win.attributes("-topmost", True)
+        win, pad = self._floating_card()
         win.protocol("WM_DELETE_WINDOW", self._hide_warning)
-
-        pad = tk.Frame(win, bg=BG, padx=24, pady=20)
-        pad.pack()
-        tk.Label(
-            pad,
-            text="Скоро перерыв",
-            bg=BG,
-            fg=WARN_ACCENT,
-            font=("Segoe UI", 14, "bold"),
-        ).pack(anchor="w")
+        accent = tk.Frame(pad, bg=WARN_ACCENT, height=3)
+        accent.pack_propagate(False)
+        accent.pack(fill="x")
+        body = tk.Frame(pad, bg=BG, padx=22, pady=18)
+        body.pack(fill="both")
+        tk.Label(body, text="Скоро перерыв", bg=BG, fg=WARN_ACCENT, font=ui_font(12, "bold")).pack(anchor="w")
         self.warn_time = tk.Label(
-            pad,
+            body,
             text=format_hms(self.remaining()),
             bg=BG,
             fg=TEXT,
-            font=("Segoe UI", 28, "bold"),
+            font=ui_font(36, "bold"),
         )
-        self.warn_time.pack(anchor="w", pady=(4, 8))
-        tk.Label(
-            pad,
-            text="Мышь будет заблокирована. Можно отложить перерыв.",
+        self.warn_time.pack(anchor="w", pady=(2, 8))
+        self.warn_body = tk.Label(
+            body,
+            text=self._warning_body(),
             bg=BG,
             fg=MUTED,
-            font=("Segoe UI", 10),
-        ).pack(anchor="w")
+            font=ui_font(10),
+            wraplength=320,
+            justify="left",
+        )
+        self.warn_body.pack(anchor="w")
 
-        buttons = tk.Frame(pad, bg=BG)
-        buttons.pack(fill="x", pady=(16, 0))
-        tk.Button(
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill="x", pady=(18, 0))
+        PillButton(
             buttons,
-            text=self._snooze_label(),
-            command=self.snooze,
-            bg=CARD,
+            self._snooze_label(),
+            self.snooze,
+            fill=CARD,
             fg=WARN_ACCENT,
-            activebackground="#21262d",
-            activeforeground=WARN_ACCENT,
-            relief="flat",
-            padx=14,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 10),
         ).pack(side="left")
-        tk.Button(
-            buttons,
-            text="Закрыть",
-            command=self._hide_warning,
-            bg=CARD,
-            fg=MUTED,
-            activebackground="#21262d",
-            activeforeground=TEXT,
-            relief="flat",
-            padx=14,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 10),
-        ).pack(side="right")
+        PillButton(buttons, "Закрыть", self._hide_warning, fill=CARD, fg=MUTED).pack(side="right")
 
-        win.update_idletasks()
-        ww = win.winfo_reqwidth()
-        wh = win.winfo_reqheight()
-        ax, ay, aw, ah = work_area()
-        win.geometry(f"{ww}x{wh}+{ax + aw - ww - 16}+{ay + ah - wh - 16}")
+        self._place_bottom_right(win)
+        win.deiconify()
+        win.lift()
         self.warn_win = win
+
+    def _floating_card(self) -> tuple[tk.Toplevel, tk.Frame]:
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.configure(bg=BORDER)
+        win.attributes("-topmost", True)
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(padx=1, pady=1)
+        return win, shell
 
     def _hide_warning(self) -> None:
         if self.warn_win is not None:
@@ -1246,6 +1848,7 @@ class FreedomTimeApp:
                 pass
             self.warn_win = None
             self.warn_time = None
+            self.warn_body = None
 
     def _tick(self) -> None:
         try:
@@ -1256,21 +1859,44 @@ class FreedomTimeApp:
         if self.root.winfo_exists():
             self.root.after(TICK_MS, self._tick)
 
+    def _sync_ring(self, left: float) -> None:
+        total = self.settings.break_seconds if self.on_break else self.settings.work_seconds
+        shown = max(0.0, left)
+        fraction = 0.0 if total <= 0 else max(0.0, min(1.0, shown / total))
+        if self.on_break:
+            color = BREAK_ACCENT
+        elif self._in_warning_window():
+            color = WARN_ACCENT
+        else:
+            color = GREEN
+        self.ring.set(fraction, color, format_hms(shown))
+
     def _update(self) -> None:
         left = self.remaining()
         self.timer_label.configure(text=format_hms(left))
+        self._sync_ring(left)
         self._refresh_tray()
 
         if self.on_break:
-            if self.overlay is not None:
-                self.overlay.attributes("-topmost", True)
-                self.overlay.lift()
-                if self.overlay_time is not None:
-                    self.overlay_time.configure(text=format_hms(left))
-            self.blocker.lock()
-            self._overlay_tick += 1
-            if self._overlay_tick % 20 == 0:
-                self.audio.keep_silenced()
+            if self.settings.mode == MODE_LOCK:
+                if self.overlay is not None:
+                    self.overlay.attributes("-topmost", True)
+                    self.overlay.lift()
+                    if self.overlay_time is not None:
+                        self.overlay_time.configure(text=format_hms(left))
+                    if self.overlay_ring is not None:
+                        total = self.settings.break_seconds or 1
+                        self.overlay_ring.set(
+                            max(0.0, left) / total,
+                            BREAK_ACCENT,
+                            format_hms(max(0.0, left)),
+                        )
+                self.blocker.lock()
+                self._overlay_tick += 1
+                if self._overlay_tick % 20 == 0:
+                    self.audio.keep_silenced()
+            elif self.remind_time is not None:
+                self.remind_time.configure(text=format_hms(max(0.0, left)))
             self._handle_skip_and_hotkeys()
             if left <= 0:
                 self.end_break()
@@ -1294,9 +1920,15 @@ class FreedomTimeApp:
                 except tk.TclError:
                     self.warn_win = None
                     self.warn_time = None
+                    self.warn_body = None
             self.status_label.configure(text="Скоро перерыв", fg=WARN_ACCENT)
             self.hint_label.configure(text="можно отложить", fg=WARN_ACCENT)
         else:
+            if self._warning_shown:
+                self._warning_shown = False
+                self._hide_warning()
+                self.status_label.configure(text="Работа", fg=GREEN)
+                self.hint_label.configure(text=self._work_hint(), fg=MUTED)
             self._set_snooze_enabled(False)
 
     def _handle_skip_and_hotkeys(self) -> None:
@@ -1318,7 +1950,7 @@ class FreedomTimeApp:
         if not combo:
             self._hotkey_armed = True
 
-        if self.on_break and esc:
+        if self.on_break and self.settings.mode == MODE_LOCK and esc:
             self.esc_held += TICK_MS / 1000.0
             remain = max(0.0, SKIP_HOLD_SECONDS - self.esc_held)
             if self.overlay_skip is not None:
@@ -1360,27 +1992,26 @@ class FreedomTimeApp:
                 pass
 
 
-def parse_args(argv: list[str]) -> Settings:
-    parser = argparse.ArgumentParser(description="FreedomTime — принудительные перерывы")
-    parser.add_argument("--work", type=float, default=WORK_MINUTES, help="Минуты работы")
-    parser.add_argument("--break", dest="brk", type=float, default=BREAK_MINUTES, help="Минуты перерыва")
+def parse_args(argv: list[str], config: dict) -> Settings:
+    parser = argparse.ArgumentParser(description="FreedomTime — перерывы по таймеру")
+    parser.add_argument("--work", type=float, default=None, help="Минуты работы")
+    parser.add_argument("--break", dest="brk", type=float, default=None, help="Минуты перерыва")
     parser.add_argument("--test", action="store_true", help="Короткий цикл для проверки предупреждения")
     args = parser.parse_args(argv)
+    saved = settings_from_config(config)
     if args.test:
         return Settings(
             work_seconds=20.0,
             break_seconds=10.0,
             warn_seconds=8.0,
             snooze_seconds=15.0,
+            mode=saved.mode,
         )
-    if args.work <= 0 or args.brk <= 0:
+    work_minutes = saved.work_seconds / 60.0 if args.work is None else args.work
+    break_minutes = saved.break_seconds / 60.0 if args.brk is None else args.brk
+    if work_minutes <= 0 or break_minutes <= 0:
         parser.error("Интервалы должны быть больше нуля")
-    return Settings(
-        work_seconds=args.work * 60.0,
-        break_seconds=args.brk * 60.0,
-        warn_seconds=WARN_MINUTES * 60.0,
-        snooze_seconds=SNOOZE_MINUTES * 60.0,
-    )
+    return make_settings(work_minutes, break_minutes, saved.mode, saved.snooze_seconds)
 
 
 def main() -> None:
@@ -1395,7 +2026,7 @@ def main() -> None:
     if already_running():
         user32.MessageBoxW(None, "FreedomTime уже запущена.", "FreedomTime", 0x40)
         sys.exit(0)
-    settings = parse_args(sys.argv[1:])
+    settings = parse_args(sys.argv[1:], load_config())
     app = FreedomTimeApp(settings)
     app.run()
 
